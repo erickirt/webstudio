@@ -58,12 +58,19 @@ import { humanizeString } from "./string-utils";
 import { serverSyncStore } from "./sync";
 import { setDifference, setUnion } from "./shim";
 import { breakCyclesMutable, findCycles } from "@webstudio-is/project-build";
-import { $awareness, $selectedPage, selectInstance } from "./awareness";
+import {
+  $awareness,
+  $selectedPage,
+  getInstancePath,
+  selectInstance,
+  type InstancePath,
+} from "./awareness";
 import {
   findClosestNonTextualContainer,
   findClosestInstanceMatchingFragment,
 } from "./matcher";
 import {
+  findAvailableVariables,
   restoreExpressionVariables,
   unsetExpressionVariables,
 } from "./data-variables";
@@ -304,11 +311,10 @@ export const insertWebstudioFragmentAt = (
     const { newInstanceIds } = insertWebstudioFragmentCopy({
       data,
       fragment,
-      availableDataSources: findAvailableDataSources(
-        data.dataSources,
-        data.instances,
-        insertable.parentSelector
-      ),
+      availableVariables: findAvailableVariables({
+        ...data,
+        startingInstanceId: insertable.parentSelector[0],
+      }),
     });
     children = fragment.children.map((child) => {
       if (child.type === "id") {
@@ -364,15 +370,17 @@ export const reparentInstance = (
     if (reparentDropTarget === undefined) {
       return;
     }
-    deleteInstanceMutable(data, sourceInstanceSelector);
+    deleteInstanceMutable(
+      data,
+      getInstancePath(sourceInstanceSelector, data.instances)
+    );
     const { newInstanceIds } = insertWebstudioFragmentCopy({
       data,
       fragment,
-      availableDataSources: findAvailableDataSources(
-        data.dataSources,
-        data.instances,
-        reparentDropTarget.parentSelector
-      ),
+      availableVariables: findAvailableVariables({
+        ...data,
+        startingInstanceId: reparentDropTarget.parentSelector[0],
+      }),
     });
     const newRootInstanceId = newInstanceIds.get(rootInstanceId);
     if (newRootInstanceId === undefined) {
@@ -394,8 +402,8 @@ export const reparentInstance = (
 };
 
 export const deleteInstanceMutable = (
-  data: WebstudioData,
-  instanceSelector: InstanceSelector
+  data: Omit<WebstudioData, "pages">,
+  instancePath: InstancePath
 ) => {
   const {
     instances,
@@ -406,14 +414,11 @@ export const deleteInstanceMutable = (
     dataSources,
     resources,
   } = data;
-  let targetInstanceId = instanceSelector[0];
-  const parentInstanceId = instanceSelector[1];
+  let targetInstance = instancePath[0].instance;
   let parentInstance =
-    parentInstanceId === undefined
-      ? undefined
-      : instances.get(parentInstanceId);
-  const grandparentInstanceId = instanceSelector[2];
-  const grandparentInstance = instances.get(grandparentInstanceId);
+    instancePath.length > 1 ? instancePath[1]?.instance : undefined;
+  const grandparentInstance =
+    instancePath.length > 2 ? instancePath[2]?.instance : undefined;
 
   // delete parent fragment too if its last child is going to be deleted
   // use case for slots: slot became empty and remove display: contents
@@ -423,18 +428,13 @@ export const deleteInstanceMutable = (
     parentInstance.children.length === 1 &&
     grandparentInstance
   ) {
-    targetInstanceId = parentInstance.id;
-    parentInstance = grandparentInstance;
-  }
-
-  // skip parent fake "item" instance and use grandparent collection as parent
-  if (grandparentInstance?.component === collectionComponent) {
+    targetInstance = parentInstance;
     parentInstance = grandparentInstance;
   }
 
   const instanceIds = findTreeInstanceIdsExcludingSlotDescendants(
     instances,
-    targetInstanceId
+    targetInstance.id
   );
   const localStyleSourceIds = findLocalStyleSourcesWithinInstances(
     styleSources.values(),
@@ -442,11 +442,13 @@ export const deleteInstanceMutable = (
     instanceIds
   );
 
+  // mutate instances from data instead of instance path
+  parentInstance = data.instances.get(parentInstance?.id as string);
   // may not exist when delete root
   if (parentInstance) {
     removeByMutable(
       parentInstance.children,
-      (child) => child.type === "id" && child.value === targetInstanceId
+      (child) => child.type === "id" && child.value === targetInstance.id
     );
   }
 
@@ -457,13 +459,13 @@ export const deleteInstanceMutable = (
   for (const prop of props.values()) {
     if (instanceIds.has(prop.instanceId)) {
       props.delete(prop.id);
+      if (prop.type === "resource") {
+        resources.delete(prop.value);
+      }
     }
   }
   for (const dataSource of dataSources.values()) {
-    if (
-      dataSource.scopeInstanceId !== undefined &&
-      instanceIds.has(dataSource.scopeInstanceId)
-    ) {
+    if (instanceIds.has(dataSource.scopeInstanceId ?? "")) {
       dataSources.delete(dataSource.id);
       if (dataSource.type === "resource") {
         resources.delete(dataSource.resourceId);
@@ -519,7 +521,7 @@ const traverseStyleValue = (
 };
 
 export const extractWebstudioFragment = (
-  data: WebstudioData,
+  data: Omit<WebstudioData, "pages">,
   rootInstanceId: string
 ): WebstudioFragment => {
   const {
@@ -603,7 +605,7 @@ export const extractWebstudioFragment = (
   const fragmentResourceIds = new Set<Resource["id"]>();
   const unsetNameById = new Map<DataSource["id"], DataSource["name"]>();
   for (const dataSource of dataSources.values()) {
-    if (fragmentInstanceIds.has(dataSource.scopeInstanceId)) {
+    if (fragmentInstanceIds.has(dataSource.scopeInstanceId ?? "")) {
       fragmentDataSources.set(dataSource.id, dataSource);
       if (dataSource.type === "resource") {
         fragmentResourceIds.add(dataSource.resourceId);
@@ -717,29 +719,6 @@ export const extractWebstudioFragment = (
   };
 };
 
-export const findAvailableDataSources = (
-  dataSources: DataSources,
-  instances: Instances,
-  instanceSelector: InstanceSelector
-) => {
-  // inline data sources not scoped to current portal
-  const instanceIds = new Set();
-  for (const instanceId of instanceSelector) {
-    const instance = instances.get(instanceId);
-    if (instance?.component === portalComponent) {
-      break;
-    }
-    instanceIds.add(instanceId);
-  }
-  const availableDataSources = new Set<DataSource["id"]>();
-  for (const { id, scopeInstanceId } of dataSources.values()) {
-    if (scopeInstanceId && instanceIds.has(scopeInstanceId)) {
-      availableDataSources.add(id);
-    }
-  }
-  return availableDataSources;
-};
-
 const replaceDataSources = (
   code: string,
   replacements: Map<DataSource["id"], DataSource["id"]>
@@ -761,11 +740,11 @@ const replaceDataSources = (
 export const insertWebstudioFragmentCopy = ({
   data,
   fragment,
-  availableDataSources,
+  availableVariables,
 }: {
-  data: WebstudioData;
+  data: Omit<WebstudioData, "pages">;
   fragment: WebstudioFragment;
-  availableDataSources: Set<DataSource["id"]>;
+  availableVariables: DataSource[];
 }) => {
   const newInstanceIds = new Map<Instance["id"], Instance["id"]>();
   const newDataSourceIds = new Map<DataSource["id"], DataSource["id"]>();
@@ -789,11 +768,6 @@ export const insertWebstudioFragmentCopy = ({
         }
       }
     }
-  }
-
-  const fragmentDataSources: DataSources = new Map();
-  for (const dataSource of fragment.dataSources) {
-    fragmentDataSources.set(dataSource.id, dataSource);
   }
 
   const {
@@ -892,10 +866,19 @@ export const insertWebstudioFragmentCopy = ({
     const usedResourceIds = new Set<Resource["id"]>();
     for (const dataSource of fragment.dataSources) {
       // insert only data sources within portal content
-      if (instanceIds.has(dataSource.scopeInstanceId)) {
+      if (instanceIds.has(dataSource.scopeInstanceId ?? "")) {
         dataSources.set(dataSource.id, dataSource);
         if (dataSource.type === "resource") {
           usedResourceIds.add(dataSource.resourceId);
+        }
+      }
+    }
+
+    for (const prop of fragment.props) {
+      if (instanceIds.has(prop.instanceId)) {
+        props.set(prop.id, prop);
+        if (prop.type === "resource") {
+          usedResourceIds.add(prop.value);
         }
       }
     }
@@ -909,12 +892,6 @@ export const insertWebstudioFragmentCopy = ({
     for (const instance of fragment.instances) {
       if (instanceIds.has(instance.id)) {
         instances.set(instance.id, instance);
-      }
-    }
-
-    for (const prop of fragment.props) {
-      if (instanceIds.has(prop.instanceId)) {
-        props.set(prop.id, prop);
       }
     }
 
@@ -974,15 +951,22 @@ export const insertWebstudioFragmentCopy = ({
   newInstanceIds.set(ROOT_INSTANCE_ID, ROOT_INSTANCE_ID);
 
   const maskedIdByName = new Map<DataSource["name"], DataSource["id"]>();
-  for (const dataSourceId of availableDataSources) {
-    const dataSource = dataSources.get(dataSourceId);
-    if (dataSource) {
-      maskedIdByName.set(dataSource.name, dataSource.id);
-    }
+  for (const dataSource of availableVariables) {
+    maskedIdByName.set(dataSource.name, dataSource.id);
   }
   const newResourceIds = new Map<Resource["id"], Resource["id"]>();
   for (let dataSource of fragment.dataSources) {
-    const { scopeInstanceId } = dataSource;
+    const scopeInstanceId = dataSource.scopeInstanceId ?? "";
+    if (scopeInstanceId === ROOT_INSTANCE_ID) {
+      // add global variable only if not exist already
+      if (
+        dataSources.has(dataSource.id) === false &&
+        maskedIdByName.has(dataSource.name) === false
+      ) {
+        dataSources.set(dataSource.id, dataSource);
+      }
+      continue;
+    }
     // insert only data sources within portal content
     if (fragmentInstanceIds.has(scopeInstanceId)) {
       const newDataSourceId = nanoid();

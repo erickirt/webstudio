@@ -1,12 +1,9 @@
 import { z } from "zod";
 
 export const Templates = z.enum([
-  "vanilla",
   "docker",
   "vercel",
   "netlify",
-  "netlify-functions",
-  "netlify-edge-functions",
   "ssg",
   "ssg-netlify",
   "ssg-vercel",

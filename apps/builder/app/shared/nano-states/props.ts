@@ -5,7 +5,6 @@ import type {
   Instance,
   Prop,
   ResourceRequest,
-  System,
   ImageAsset,
 } from "@webstudio-is/sdk";
 import {
@@ -14,9 +13,9 @@ import {
   transpileExpression,
   collectionComponent,
   portalComponent,
+  ROOT_INSTANCE_ID,
 } from "@webstudio-is/sdk";
 import { normalizeProps, textContentAttribute } from "@webstudio-is/react-sdk";
-import { isFeatureEnabled } from "@webstudio-is/feature-flags";
 import { mapGroupBy } from "~/shared/shim";
 import { $instances } from "./instances";
 import {
@@ -31,16 +30,12 @@ import {
 import { $pages } from "./pages";
 import type { InstanceSelector } from "../tree-utils";
 import { restResourcesLoader } from "../router-utils";
-import {
-  $dataSourceVariables,
-  $resourceValues,
-  $selectedPageDefaultSystem,
-  mergeSystem,
-} from "./variables";
+import { $dataSourceVariables, $resourceValues } from "./variables";
 import { uploadingFileDataToAsset } from "~/builder/shared/assets/asset-utils";
 import { fetch } from "~/shared/fetch.client";
 import { $selectedPage, getInstanceKey } from "../awareness";
 import { computeExpression } from "../data-variables";
+import { $currentSystem, $currentSystemVariableId } from "../system";
 
 export const assetBaseUrl = "/cgi/asset/";
 
@@ -136,9 +131,9 @@ const $unscopedVariableValues = computed(
     $dataSourceVariables,
     $resourceValues,
     $selectedPage,
-    $selectedPageDefaultSystem,
+    $currentSystem,
   ],
-  (dataSources, dataSourceVariables, resourceValues, page, defaultSystem) => {
+  (dataSources, dataSourceVariables, resourceValues, page, system) => {
     const values = new Map<string, unknown>();
     for (const [dataSourceId, dataSource] of dataSources) {
       if (dataSource.type === "variable") {
@@ -149,8 +144,9 @@ const $unscopedVariableValues = computed(
       }
       if (dataSource.type === "parameter") {
         let value = dataSourceVariables.get(dataSourceId);
+        // @todo support global system
         if (dataSource.id === page?.systemDataSourceId) {
-          value = mergeSystem(defaultSystem, value as undefined | System);
+          value = system;
         }
         values.set(dataSourceId, value);
       }
@@ -160,11 +156,6 @@ const $unscopedVariableValues = computed(
     }
     return values;
   }
-);
-
-const $selectedPageSystemId = computed(
-  $selectedPage,
-  (page) => page?.systemDataSourceId
 );
 
 /**
@@ -177,10 +168,10 @@ const $loaderVariableValues = computed(
   [
     $dataSources,
     $dataSourceVariables,
-    $selectedPageSystemId,
-    $selectedPageDefaultSystem,
+    $currentSystemVariableId,
+    $currentSystem,
   ],
-  (dataSources, dataSourceVariables, systemId, defaultSystem) => {
+  (dataSources, dataSourceVariables, systemVariableId, system) => {
     const values = new Map<string, unknown>();
     for (const [dataSourceId, dataSource] of dataSources) {
       if (dataSource.type === "variable") {
@@ -191,8 +182,8 @@ const $loaderVariableValues = computed(
       }
       if (dataSource.type === "parameter") {
         let value = dataSourceVariables.get(dataSourceId);
-        if (dataSource.id === systemId) {
-          value = mergeSystem(defaultSystem, value as undefined | System);
+        if (dataSource.id === systemVariableId) {
+          value = system;
         }
         values.set(dataSourceId, value);
       }
@@ -226,6 +217,7 @@ export const $propValuesByInstanceSelector = computed(
     assets,
     uploadingFilesDataStore
   ) => {
+    // already includes global variables
     const variableValues = new Map<string, unknown>(unscopedVariableValues);
 
     let propsList = Array.from(props.values());
@@ -385,7 +377,7 @@ export const $variableValuesByInstanceSelector = computed(
     $dataSources,
     $dataSourceVariables,
     $resourceValues,
-    $selectedPageDefaultSystem,
+    $currentSystem,
   ],
   (
     instances,
@@ -394,7 +386,7 @@ export const $variableValuesByInstanceSelector = computed(
     dataSources,
     dataSourceVariables,
     resourceValues,
-    defaultSystem
+    system
   ) => {
     const propsByInstanceId = mapGroupBy(
       props.values(),
@@ -414,14 +406,15 @@ export const $variableValuesByInstanceSelector = computed(
     if (page === undefined) {
       return variableValuesByInstanceSelector;
     }
-    const traverseInstances = (
+
+    const collectVariables = (
       instanceSelector: InstanceSelector,
-      parentVariableValues: Map<string, unknown>
+      parentVariableValues = new Map<string, unknown>(),
+      parentVariableNames = new Map<DataSource["name"], DataSource["id"]>()
     ) => {
       const [instanceId] = instanceSelector;
-      const instance = instances.get(instanceId);
-
-      let variableValues = new Map<string, unknown>(parentVariableValues);
+      const variableNames = new Map(parentVariableNames);
+      const variableValues = new Map<string, unknown>(parentVariableValues);
       variableValuesByInstanceSelector.set(
         getInstanceKey(instanceSelector),
         variableValues
@@ -429,12 +422,10 @@ export const $variableValuesByInstanceSelector = computed(
       const variables = variablesByInstanceId.get(instanceId);
       if (variables) {
         for (const variable of variables) {
-          if (
-            variable.id === page.systemDataSourceId &&
-            isFeatureEnabled("filters") === false
-          ) {
-            continue;
-          }
+          // delete previous variable with the same name
+          // because it is masked and no longer available
+          variableValues.delete(variableNames.get(variable.name) ?? "");
+          variableNames.set(variable.name, variable.id);
           if (variable.type === "variable") {
             const value = dataSourceVariables.get(variable.id);
             variableValues.set(variable.id, value ?? variable.value.value);
@@ -443,10 +434,7 @@ export const $variableValuesByInstanceSelector = computed(
             const value = dataSourceVariables.get(variable.id);
             variableValues.set(variable.id, value);
             if (variable.id === page.systemDataSourceId) {
-              variableValues.set(
-                variable.id,
-                mergeSystem(defaultSystem, value as undefined | System)
-              );
+              variableValues.set(variable.id, system);
             }
           }
           if (variable.type === "resource") {
@@ -455,7 +443,21 @@ export const $variableValuesByInstanceSelector = computed(
           }
         }
       }
+      return { variableValues, variableNames };
+    };
 
+    const traverseInstances = (
+      instanceSelector: InstanceSelector,
+      parentVariableValues = new Map<string, unknown>(),
+      parentVariableNames = new Map<DataSource["name"], DataSource["id"]>()
+    ) => {
+      let { variableValues, variableNames } = collectVariables(
+        instanceSelector,
+        parentVariableValues,
+        parentVariableNames
+      );
+
+      const [instanceId] = instanceSelector;
       const propValues = new Map<Prop["name"], unknown>();
       const props = propsByInstanceId.get(instanceId);
       const parameters = new Map<Prop["name"], DataSource["id"]>();
@@ -483,6 +485,7 @@ export const $variableValuesByInstanceSelector = computed(
         }
       }
 
+      const instance = instances.get(instanceId);
       if (instance === undefined) {
         return;
       }
@@ -514,15 +517,29 @@ export const $variableValuesByInstanceSelector = computed(
       }
       // reset values for slot children to let slots behave as isolated components
       if (instance.component === portalComponent) {
-        variableValues = new Map();
+        // allow accessing global variables in slots
+        variableValues = globalVariableValues;
+        variableNames = globalVariableNames;
       }
       for (const child of instance.children) {
         if (child.type === "id") {
-          traverseInstances([child.value, ...instanceSelector], variableValues);
+          traverseInstances(
+            [child.value, ...instanceSelector],
+            variableValues,
+            variableNames
+          );
         }
       }
     };
-    traverseInstances([page.rootInstanceId], new Map());
+    const {
+      variableValues: globalVariableValues,
+      variableNames: globalVariableNames,
+    } = collectVariables([ROOT_INSTANCE_ID]);
+    traverseInstances(
+      [page.rootInstanceId, ROOT_INSTANCE_ID],
+      globalVariableValues,
+      globalVariableNames
+    );
     return variableValuesByInstanceSelector;
   }
 );

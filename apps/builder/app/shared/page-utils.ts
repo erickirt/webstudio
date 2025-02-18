@@ -16,6 +16,7 @@ import {
   extractWebstudioFragment,
   insertWebstudioFragmentCopy,
 } from "./instance-utils";
+import { findAvailableVariables } from "./data-variables";
 
 const deduplicateName = (
   pages: Pages,
@@ -99,19 +100,26 @@ export const insertPageCopyMutable = ({
   insertWebstudioFragmentCopy({
     data: target.data,
     fragment: extractWebstudioFragment(source.data, ROOT_INSTANCE_ID),
-    availableDataSources: new Set(),
+    availableVariables: findAvailableVariables({
+      ...target.data,
+      startingInstanceId: ROOT_INSTANCE_ID,
+    }),
   });
   // copy paste page body
   const { newInstanceIds, newDataSourceIds } = insertWebstudioFragmentCopy({
     data: target.data,
     fragment: extractWebstudioFragment(source.data, page.rootInstanceId),
-    availableDataSources: new Set(),
+    availableVariables: findAvailableVariables({
+      ...target.data,
+      startingInstanceId: ROOT_INSTANCE_ID,
+    }),
   });
   const newPageId = nanoid();
   const newRootInstanceId =
     newInstanceIds.get(page.rootInstanceId) ?? page.rootInstanceId;
   const newSystemDataSourceId =
-    newDataSourceIds.get(page.systemDataSourceId) ?? page.systemDataSourceId;
+    newDataSourceIds.get(page.systemDataSourceId ?? "") ??
+    page.systemDataSourceId;
   const newPage: Page = {
     ...page,
     id: newPageId,

@@ -72,6 +72,19 @@ export const getInstanceKey = <
 ): (InstanceSelector extends undefined ? undefined : never) | string =>
   JSON.stringify(instanceSelector);
 
+export const $selectedInstanceKeyWithRoot = computed(
+  $awareness,
+  (awareness) => {
+    const instanceSelector = awareness?.instanceSelector;
+    if (instanceSelector) {
+      if (instanceSelector[0] === ROOT_INSTANCE_ID) {
+        return getInstanceKey(instanceSelector);
+      }
+      return getInstanceKey([...instanceSelector, ROOT_INSTANCE_ID]);
+    }
+  }
+);
+
 export const $selectedInstanceKey = computed($awareness, (awareness) =>
   getInstanceKey(awareness?.instanceSelector)
 );
@@ -81,19 +94,19 @@ export type InstancePath = Array<{
   instanceSelector: string[];
 }>;
 
-const getInstancePath = (
+export const getInstancePath = (
+  instanceSelector: string[],
   instances: Instances,
-  virtualInstances: Instances,
-  temporaryInstances: Instances,
-  instanceSelector: string[]
+  virtualInstances?: Instances,
+  temporaryInstances?: Instances
 ): InstancePath => {
   const instancePath: InstancePath = [];
   for (let index = 0; index < instanceSelector.length; index += 1) {
     const instanceId = instanceSelector[index];
     const instance =
       instances.get(instanceId) ??
-      virtualInstances.get(instanceId) ??
-      temporaryInstances.get(instanceId);
+      virtualInstances?.get(instanceId) ??
+      temporaryInstances?.get(instanceId);
     // collection item can be undefined
     if (instance === undefined) {
       continue;
@@ -114,10 +127,10 @@ export const $selectedInstancePath = computed(
       return;
     }
     return getInstancePath(
+      instanceSelector,
       instances,
       virtualInstances,
-      temporaryInstances,
-      instanceSelector
+      temporaryInstances
     );
   }
 );
@@ -134,10 +147,10 @@ export const $selectedInstancePathWithRoot = computed(
       instanceSelector = [...instanceSelector, ROOT_INSTANCE_ID];
     }
     return getInstancePath(
+      instanceSelector,
       instances,
       virtualInstances,
-      temporaryInstances,
-      instanceSelector
+      temporaryInstances
     );
   }
 );

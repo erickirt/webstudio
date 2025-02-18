@@ -1,10 +1,13 @@
 import {
   type DataSource,
   type DataSources,
+  type Instance,
   type Instances,
   type Props,
-  Resource,
+  type Resource,
   type Resources,
+  type WebstudioData,
+  ROOT_INSTANCE_ID,
   decodeDataVariableId,
   encodeDataVariableId,
   findTreeInstanceIdsExcludingSlotDescendants,
@@ -14,7 +17,6 @@ import {
   createJsonStringifyProxy,
   isPlainObject,
 } from "@webstudio-is/sdk/runtime";
-import type { InstancePath } from "./awareness";
 
 const allowedJsChars = /[A-Za-z_]/;
 
@@ -181,19 +183,41 @@ export const computeExpression = (
   }
 };
 
-export const findMaskedVariables = ({
-  instancePath,
+const findMaskedVariablesByInstanceId = ({
+  startingInstanceId,
+  instances,
   dataSources,
 }: {
-  instancePath: InstancePath;
+  startingInstanceId: Instance["id"];
+  instances: Instances;
   dataSources: DataSources;
 }) => {
+  const parentInstanceById = new Map<Instance["id"], Instance["id"]>();
+  for (const instance of instances.values()) {
+    // interrupt lookup because slot variables cannot be passed to slot content
+    if (instance.component === "Slot") {
+      continue;
+    }
+    for (const child of instance.children) {
+      if (child.type === "id") {
+        parentInstanceById.set(child.value, instance.id);
+      }
+    }
+  }
+  let currentId: undefined | string = startingInstanceId;
+  const instanceIdsPath: Instance["id"][] = [];
+  while (currentId) {
+    instanceIdsPath.push(currentId);
+    currentId = parentInstanceById.get(currentId);
+  }
+  // allow accessing global variables everywhere
+  instanceIdsPath.push(ROOT_INSTANCE_ID);
   const maskedVariables = new Map<DataSource["name"], DataSource["id"]>();
   // start from the root to descendant
   // so child variables override parent variables
-  for (const { instance } of instancePath.slice().reverse()) {
+  for (const instanceId of instanceIdsPath.reverse()) {
     for (const dataSource of dataSources.values()) {
-      if (dataSource.scopeInstanceId === instance.id) {
+      if (dataSource.scopeInstanceId === instanceId) {
         maskedVariables.set(dataSource.name, dataSource.id);
       }
     }
@@ -201,190 +225,241 @@ export const findMaskedVariables = ({
   return maskedVariables;
 };
 
+export const findAvailableVariables = ({
+  startingInstanceId,
+  instances,
+  dataSources,
+}: {
+  startingInstanceId: Instance["id"];
+  instances: Instances;
+  dataSources: DataSources;
+}) => {
+  const maskedVariables = findMaskedVariablesByInstanceId({
+    startingInstanceId,
+    instances,
+    dataSources,
+  });
+  const availableVariables: DataSource[] = [];
+  for (const dataSourceId of maskedVariables.values()) {
+    const dataSource = dataSources.get(dataSourceId);
+    if (dataSource) {
+      availableVariables.push(dataSource);
+    }
+  }
+  return availableVariables;
+};
+
+const traverseExpressions = ({
+  startingInstanceId,
+  instances,
+  props,
+  dataSources,
+  resources,
+  update,
+}: {
+  startingInstanceId: Instance["id"];
+  instances: Instances;
+  props: Props;
+  dataSources: DataSources;
+  resources: Resources;
+  update: (expression: string, args?: string[]) => void | string;
+}) => {
+  const instanceIds = findTreeInstanceIdsExcludingSlotDescendants(
+    instances,
+    startingInstanceId
+  );
+  const resourceIds = new Set<Resource["id"]>();
+
+  for (const instance of instances.values()) {
+    if (instanceIds.has(instance.id) === false) {
+      continue;
+    }
+    for (const child of instance.children) {
+      if (child.type === "expression") {
+        const newExpression = update(child.value);
+        if (newExpression !== undefined) {
+          child.value = newExpression;
+        }
+      }
+    }
+  }
+
+  for (const prop of props.values()) {
+    if (instanceIds.has(prop.instanceId) === false) {
+      continue;
+    }
+    if (prop.type === "expression") {
+      const newExpression = update(prop.value);
+      if (newExpression !== undefined) {
+        prop.value = newExpression;
+      }
+      continue;
+    }
+    if (prop.type === "action") {
+      for (const action of prop.value) {
+        const newExpression = update(action.code, action.args);
+        if (newExpression !== undefined) {
+          action.code = newExpression;
+        }
+      }
+      continue;
+    }
+    if (prop.type === "resource") {
+      resourceIds.add(prop.value);
+      continue;
+    }
+  }
+
+  for (const dataSource of dataSources.values()) {
+    if (
+      instanceIds.has(dataSource.scopeInstanceId ?? "") &&
+      dataSource.type === "resource"
+    ) {
+      resourceIds.add(dataSource.resourceId);
+    }
+  }
+
+  for (const resource of resources.values()) {
+    if (resourceIds.has(resource.id) === false) {
+      continue;
+    }
+    const newExpression = update(resource.url);
+    if (newExpression !== undefined) {
+      resource.url = newExpression;
+    }
+    for (const header of resource.headers) {
+      const newExpression = update(header.value);
+      if (newExpression !== undefined) {
+        header.value = newExpression;
+      }
+    }
+    if (resource.body) {
+      const newExpression = update(resource.body);
+      if (newExpression !== undefined) {
+        resource.body = newExpression;
+      }
+    }
+  }
+};
+
 export const findUnsetVariableNames = ({
-  instancePath,
+  startingInstanceId,
   instances,
   props,
   dataSources,
   resources,
 }: {
-  instancePath: InstancePath;
+  startingInstanceId: Instance["id"];
   instances: Instances;
   props: Props;
   dataSources: DataSources;
   resources: Resources;
 }) => {
   const unsetVariables = new Set<DataSource["name"]>();
-  const [{ instance: startingInstance }] = instancePath;
-  const instanceIds = findTreeInstanceIdsExcludingSlotDescendants(
+  traverseExpressions({
+    startingInstanceId: startingInstanceId,
     instances,
-    startingInstance.id
-  );
-  const resourceIds = new Set<Resource["id"]>();
-
-  const collectUnsetVariables = (
-    expression: string,
-    exclude: string[] = []
-  ) => {
-    transpileExpression({
-      expression,
-      replaceVariable: (identifier) => {
-        const id = decodeDataVariableId(identifier);
-        if (id === undefined && exclude.includes(identifier) === false) {
-          unsetVariables.add(decodeDataVariableName(identifier));
-        }
-      },
-    });
-  };
-
-  for (const instance of instances.values()) {
-    if (instanceIds.has(instance.id) === false) {
-      continue;
-    }
-    for (const child of instance.children) {
-      if (child.type === "expression") {
-        collectUnsetVariables(child.value);
-      }
-    }
-  }
-
-  for (const prop of props.values()) {
-    if (instanceIds.has(prop.instanceId) === false) {
-      continue;
-    }
-    if (prop.type === "expression") {
-      collectUnsetVariables(prop.value);
-      continue;
-    }
-    if (prop.type === "action") {
-      for (const action of prop.value) {
-        collectUnsetVariables(action.code, action.args);
-      }
-      continue;
-    }
-    if (prop.type === "resource") {
-      resourceIds.add(prop.value);
-      continue;
-    }
-  }
-
-  for (const dataSource of dataSources.values()) {
-    if (
-      instanceIds.has(dataSource.scopeInstanceId) &&
-      dataSource.type === "resource"
-    ) {
-      resourceIds.add(dataSource.resourceId);
-    }
-  }
-
-  for (const resource of resources.values()) {
-    if (resourceIds.has(resource.id) === false) {
-      continue;
-    }
-    collectUnsetVariables(resource.url);
-    for (const header of resource.headers) {
-      collectUnsetVariables(header.value);
-    }
-    if (resource.body) {
-      collectUnsetVariables(resource.body);
-    }
-  }
+    props,
+    dataSources,
+    resources,
+    update: (expression, args = []) => {
+      transpileExpression({
+        expression,
+        replaceVariable: (identifier) => {
+          const id = decodeDataVariableId(identifier);
+          if (id === undefined && args.includes(identifier) === false) {
+            unsetVariables.add(decodeDataVariableName(identifier));
+          }
+        },
+      });
+    },
+  });
   return Array.from(unsetVariables);
 };
 
-export const restoreTreeVariablesMutable = ({
-  instancePath,
+export const rebindTreeVariablesMutable = ({
+  startingInstanceId,
   instances,
   props,
   dataSources,
   resources,
 }: {
-  instancePath: InstancePath;
+  startingInstanceId: Instance["id"];
   instances: Instances;
   props: Props;
   dataSources: DataSources;
   resources: Resources;
 }) => {
-  const maskedVariables = findMaskedVariables({ instancePath, dataSources });
-  const [{ instance: startingInstance }] = instancePath;
-  const instanceIds = findTreeInstanceIdsExcludingSlotDescendants(
+  const maskedVariables = findMaskedVariablesByInstanceId({
+    startingInstanceId,
+    dataSources,
     instances,
-    startingInstance.id
-  );
-  const resourceIds = new Set<Resource["id"]>();
-
-  for (const instance of instances.values()) {
-    if (instanceIds.has(instance.id) === false) {
-      continue;
-    }
-    for (const child of instance.children) {
-      if (child.type === "expression") {
-        child.value = restoreExpressionVariables({
-          expression: child.value,
-          maskedIdByName: maskedVariables,
-        });
-      }
-    }
+  });
+  const unsetNameById = new Map<DataSource["id"], DataSource["name"]>();
+  for (const { id, name } of dataSources.values()) {
+    unsetNameById.set(id, name);
   }
-
-  for (const prop of props.values()) {
-    if (instanceIds.has(prop.instanceId) === false) {
-      continue;
-    }
-    if (prop.type === "expression") {
-      prop.value = restoreExpressionVariables({
-        expression: prop.value,
-        maskedIdByName: maskedVariables,
-      });
-      continue;
-    }
-    if (prop.type === "action") {
-      for (const action of prop.value) {
-        const maskedVariablesWithoutArgs = new Map(maskedVariables);
-        for (const arg of action.args) {
-          maskedVariablesWithoutArgs.delete(arg);
+  traverseExpressions({
+    startingInstanceId,
+    instances,
+    props,
+    dataSources,
+    resources,
+    update: (expression, args) => {
+      let maskedIdByName = new Map(maskedVariables);
+      if (args) {
+        maskedIdByName = new Map(maskedIdByName);
+        for (const arg of args) {
+          maskedIdByName.delete(arg);
         }
-        action.code = restoreExpressionVariables({
-          expression: action.code,
-          maskedIdByName: maskedVariablesWithoutArgs,
-        });
       }
-      continue;
-    }
-    if (prop.type === "resource") {
-      resourceIds.add(prop.value);
-      continue;
-    }
-  }
-
-  for (const dataSource of dataSources.values()) {
-    if (
-      instanceIds.has(dataSource.scopeInstanceId) &&
-      dataSource.type === "resource"
-    ) {
-      resourceIds.add(dataSource.resourceId);
-    }
-  }
-
-  for (const resource of resources.values()) {
-    if (resourceIds.has(resource.id) === false) {
-      continue;
-    }
-    resource.url = restoreExpressionVariables({
-      expression: resource.url,
-      maskedIdByName: maskedVariables,
-    });
-    for (const header of resource.headers) {
-      header.value = restoreExpressionVariables({
-        expression: header.value,
-        maskedIdByName: maskedVariables,
+      expression = unsetExpressionVariables({
+        expression,
+        unsetNameById,
       });
-    }
-    if (resource.body) {
-      resource.body = restoreExpressionVariables({
-        expression: resource.body,
-        maskedIdByName: maskedVariables,
+      expression = restoreExpressionVariables({
+        expression,
+        maskedIdByName,
       });
-    }
+      return expression;
+    },
+  });
+};
+
+export const deleteVariableMutable = (
+  data: Omit<WebstudioData, "pages">,
+  variableId: DataSource["id"]
+) => {
+  const dataSource = data.dataSources.get(variableId);
+  if (dataSource === undefined) {
+    return;
   }
+  data.dataSources.delete(variableId);
+  if (dataSource.type === "resource") {
+    data.resources.delete(dataSource.resourceId);
+  }
+  const unsetNameById = new Map<DataSource["id"], DataSource["name"]>();
+  unsetNameById.set(dataSource.id, dataSource.name);
+  const startingInstanceId = dataSource.scopeInstanceId ?? "";
+  const maskedIdByName = findMaskedVariablesByInstanceId({
+    startingInstanceId,
+    instances: data.instances,
+    dataSources: data.dataSources,
+  });
+  // unset deleted variable in expressions
+  traverseExpressions({
+    ...data,
+    startingInstanceId,
+    update: (expression) => {
+      expression = unsetExpressionVariables({
+        expression,
+        unsetNameById,
+      });
+      expression = restoreExpressionVariables({
+        expression,
+        maskedIdByName,
+      });
+      return expression;
+    },
+  });
 };

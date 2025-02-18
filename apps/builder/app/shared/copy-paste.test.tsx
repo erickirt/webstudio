@@ -3,6 +3,7 @@ import stripIndent from "strip-indent";
 import { createRegularStyleSheet } from "@webstudio-is/css-engine";
 import { createDefaultPages } from "@webstudio-is/project-build";
 import {
+  encodeDataVariableId,
   getStyleDeclKey,
   ROOT_INSTANCE_ID,
   type WebstudioData,
@@ -17,25 +18,22 @@ import {
   Variable,
   ResourceValue,
   ActionValue,
+  renderTemplate,
+  Parameter,
 } from "@webstudio-is/template";
 import type { Project } from "@webstudio-is/project";
 import {
   extractWebstudioFragment,
-  findAvailableDataSources,
   insertWebstudioFragmentCopy,
 } from "./instance-utils";
 import { $project } from "./nano-states";
-
-const pages = createDefaultPages({
-  rootInstanceId: "bodyId",
-  systemDataSourceId: "",
-});
+import { findAvailableVariables } from "./data-variables";
 
 $project.set({ id: "current_project" } as Project);
 
 const createStub = (element: JSX.Element) => {
   const project = {
-    pages: createDefaultPages({ rootInstanceId: "", systemDataSourceId: "" }),
+    pages: createDefaultPages({ rootInstanceId: "" }),
     ...renderData(element),
   };
   // global root instance is never stored in data
@@ -91,6 +89,78 @@ const insertStyles = ({
   }
 };
 
+test("extract the instance by id and all its descendants including slot instances", () => {
+  const data = renderData(
+    <$.Body ws:id="bodyId">
+      <$.Box ws:id="boxId">
+        <$.Slot>
+          <$.Fragment></$.Fragment>
+        </$.Slot>
+      </$.Box>
+      <$.Text ws:id="textId"></$.Text>
+    </$.Body>
+  );
+  const { instances } = extractWebstudioFragment(data, "boxId");
+  expect(instances).toEqual([
+    expect.objectContaining({ component: "Box" }),
+    expect.objectContaining({ component: "Slot" }),
+    expect.objectContaining({ component: "Fragment" }),
+  ]);
+});
+
+test("insert instances with slots", () => {
+  const data = renderData(<$.Body ws:id="bodyId"></$.Body>);
+  const fragment = renderTemplate(
+    <$.Slot ws:id="slotId">
+      <$.Fragment ws:id="fragmentId">
+        <$.Box ws:id="boxId"></$.Box>
+      </$.Fragment>
+    </$.Slot>
+  );
+  expect(data.instances.size).toEqual(1);
+  insertWebstudioFragmentCopy({
+    data,
+    fragment,
+    availableVariables: [],
+  });
+  expect(data.instances.size).toEqual(4);
+  insertWebstudioFragmentCopy({
+    data,
+    fragment,
+    availableVariables: [],
+  });
+  expect(data.instances.size).toEqual(5);
+  expect(Array.from(data.instances.values())).toEqual([
+    expect.objectContaining({ component: "Body" }),
+    // id of slot instances are preserved
+    expect.objectContaining({ component: "Fragment", id: "fragmentId" }),
+    expect.objectContaining({ component: "Box", id: "boxId" }),
+    expect.objectContaining({ component: "Slot" }),
+    expect.objectContaining({ component: "Slot" }),
+  ]);
+});
+
+test("insert instances with multiple roots", () => {
+  const data = renderData(<$.Body ws:id="bodyId"></$.Body>);
+  const fragment = renderTemplate(
+    <>
+      <$.Box>
+        <$.Text></$.Text>
+      </$.Box>
+      <$.Box>
+        <$.Text></$.Text>
+      </$.Box>
+    </>
+  );
+  expect(data.instances.size).toEqual(1);
+  insertWebstudioFragmentCopy({
+    data,
+    fragment,
+    availableVariables: [],
+  });
+  expect(data.instances.size).toEqual(5);
+});
+
 test("should add :root local styles", () => {
   const oldProject = createStub(
     <ws.root
@@ -107,7 +177,7 @@ test("should add :root local styles", () => {
   insertWebstudioFragmentCopy({
     data: newProject,
     fragment,
-    availableDataSources: new Set(),
+    availableVariables: [],
   });
   expect(toCss(newProject)).toEqual(
     stripIndent(`
@@ -145,7 +215,7 @@ test("should merge :root local styles", () => {
   insertWebstudioFragmentCopy({
     data: newProject,
     fragment,
-    availableDataSources: new Set(),
+    availableVariables: [],
   });
   expect(toCss(newProject)).toEqual(
     stripIndent(`
@@ -174,7 +244,7 @@ test("should copy local styles of duplicated instance", () => {
   insertWebstudioFragmentCopy({
     data: project,
     fragment,
-    availableDataSources: new Set(),
+    availableVariables: [],
   });
   const newInstanceId = Array.from(project.instances.keys()).at(-1);
   expect(toCss(project)).toEqual(
@@ -213,6 +283,75 @@ test("should copy local styles of duplicated instance", () => {
   );
 });
 
+describe("props", () => {
+  test("extract all props bound to fragment instances", () => {
+    const data = renderData(
+      <$.Body ws:id="bodyId" data-body="">
+        <$.Box ws:id="boxId" data-box="">
+          <$.Text ws:id="textId" data-text=""></$.Text>
+        </$.Box>
+      </$.Body>
+    );
+    const { props } = extractWebstudioFragment(data, "boxId");
+    expect(props).toEqual([
+      expect.objectContaining({ name: "data-box" }),
+      expect.objectContaining({ name: "data-text" }),
+    ]);
+  });
+
+  test("insert props with new ids", () => {
+    const data = renderData(<$.Body ws:id="bodyId"></$.Body>);
+    const fragment = renderTemplate(
+      <$.Box ws:id="boxId" data-box="">
+        <$.Text ws:id="textId" data-text=""></$.Text>
+      </$.Box>
+    );
+    insertWebstudioFragmentCopy({
+      data,
+      fragment,
+      availableVariables: [],
+    });
+    expect(Array.from(data.props.values())).toEqual([
+      expect.objectContaining({
+        id: expect.toSatisfy((value) => value !== fragment.props[0].id),
+        name: "data-box",
+      }),
+      expect.objectContaining({
+        id: expect.toSatisfy((value) => value !== fragment.props[1].id),
+        name: "data-text",
+      }),
+    ]);
+  });
+
+  test("preserve ids when insert props from slots", () => {
+    const data = renderData(<$.Body ws:id="bodyId"></$.Body>);
+    const fragment = renderTemplate(
+      <$.Slot>
+        <$.Fragment>
+          <$.Box ws:id="boxId" data-box="">
+            <$.Text ws:id="textId" data-text=""></$.Text>
+          </$.Box>
+        </$.Fragment>
+      </$.Slot>
+    );
+    insertWebstudioFragmentCopy({
+      data,
+      fragment,
+      availableVariables: [],
+    });
+    expect(Array.from(data.props.values())).toEqual([
+      expect.objectContaining({
+        id: fragment.props[0].id,
+        name: "data-box",
+      }),
+      expect.objectContaining({
+        id: fragment.props[1].id,
+        name: "data-text",
+      }),
+    ]);
+  });
+});
+
 describe("variables", () => {
   test("extract variable", () => {
     const boxVariable = new Variable("Box Variable", "");
@@ -221,7 +360,7 @@ describe("variables", () => {
         <$.Box ws:id="boxId" vars={expression`${boxVariable}`}></$.Box>
       </$.Body>
     );
-    const fragment = extractWebstudioFragment({ pages, ...data }, "boxId");
+    const fragment = extractWebstudioFragment(data, "boxId");
     expect(fragment.dataSources).toEqual([
       expect.objectContaining({ id: "0", type: "variable" }),
     ]);
@@ -248,7 +387,7 @@ describe("variables", () => {
         </$.Box>
       </$.Body>
     );
-    const fragment = extractWebstudioFragment({ pages, ...data }, "boxId");
+    const fragment = extractWebstudioFragment(data, "boxId");
     expect(fragment.dataSources).toEqual([]);
     expect(fragment.props).toEqual([
       expect.objectContaining({
@@ -274,6 +413,103 @@ describe("variables", () => {
     ]);
   });
 
+  test("insert variables with new ids", () => {
+    const boxParameter = new Parameter("My Parameter");
+    const data = renderData(<$.Body ws:id="bodyId"></$.Body>);
+    const fragment = renderTemplate(
+      <$.Box
+        ws:id="boxId"
+        vars={expression`${boxParameter}`}
+        action={new ActionValue([], expression`${boxParameter}`)}
+        parameter={boxParameter}
+      >
+        {expression`${boxParameter}`}
+      </$.Box>
+    );
+    insertWebstudioFragmentCopy({
+      data,
+      fragment,
+      availableVariables: [],
+    });
+    const [newDataSourceId] = data.dataSources.keys();
+    expect(Array.from(data.dataSources.values())).toEqual([
+      expect.objectContaining({
+        id: expect.toSatisfy((value) => value !== fragment.dataSources[0].id),
+        name: "My Parameter",
+      }),
+    ]);
+    expect(Array.from(data.props.values())).toEqual([
+      expect.objectContaining({
+        name: "vars",
+        value: encodeDataVariableId(newDataSourceId),
+      }),
+      expect.objectContaining({
+        name: "action",
+        value: [
+          {
+            type: "execute",
+            args: [],
+            code: encodeDataVariableId(newDataSourceId),
+          },
+        ],
+      }),
+      expect.objectContaining({
+        name: "parameter",
+        value: newDataSourceId,
+      }),
+    ]);
+  });
+
+  test("preserve ids when insert variables from portals", () => {
+    const boxParameter = new Parameter("My Parameter");
+    const data = renderData(<$.Body ws:id="bodyId"></$.Body>);
+    const fragment = renderTemplate(
+      <$.Slot>
+        <$.Fragment>
+          <$.Box
+            ws:id="boxId"
+            vars={expression`${boxParameter}`}
+            action={new ActionValue([], expression`${boxParameter}`)}
+            parameter={boxParameter}
+          >
+            {expression`${boxParameter}`}
+          </$.Box>
+        </$.Fragment>
+      </$.Slot>
+    );
+    insertWebstudioFragmentCopy({
+      data,
+      fragment,
+      availableVariables: [],
+    });
+    expect(Array.from(data.dataSources.values())).toEqual([
+      expect.objectContaining({
+        id: fragment.dataSources[0].id,
+        name: "My Parameter",
+      }),
+    ]);
+    expect(Array.from(data.props.values())).toEqual([
+      expect.objectContaining({
+        name: "vars",
+        value: encodeDataVariableId(fragment.dataSources[0].id),
+      }),
+      expect.objectContaining({
+        name: "action",
+        value: [
+          {
+            type: "execute",
+            args: [],
+            code: encodeDataVariableId(fragment.dataSources[0].id),
+          },
+        ],
+      }),
+      expect.objectContaining({
+        name: "parameter",
+        value: fragment.dataSources[0].id,
+      }),
+    ]);
+  });
+
   test("restore unset variables when insert fragment", () => {
     const bodyVariable = new Variable("Body Variable", "");
     const data = renderData(
@@ -289,15 +525,14 @@ describe("variables", () => {
         </$.Box>
       </$.Body>
     );
-    const fragment = extractWebstudioFragment({ pages, ...data }, "boxId");
+    const fragment = extractWebstudioFragment(data, "boxId");
     insertWebstudioFragmentCopy({
-      data: { pages, ...data },
+      data,
       fragment,
-      availableDataSources: findAvailableDataSources(
-        data.dataSources,
-        data.instances,
-        ["bodyId"]
-      ),
+      availableVariables: findAvailableVariables({
+        ...data,
+        startingInstanceId: "bodyId",
+      }),
     });
     const newInstanceId = Array.from(data.instances.keys()).at(-1) ?? "";
     expect(newInstanceId).not.toEqual("boxId");
@@ -333,7 +568,7 @@ describe("resources", () => {
         <$.Box ws:id="boxId" vars={expression`${resourceVariable}`}></$.Box>
       </$.Body>
     );
-    const fragment = extractWebstudioFragment({ pages, ...data }, "boxId");
+    const fragment = extractWebstudioFragment(data, "boxId");
     expect(fragment.dataSources).toEqual([
       expect.objectContaining({ id: "1", type: "variable" }),
       expect.objectContaining({ id: "0", type: "resource" }),
@@ -360,7 +595,7 @@ describe("resources", () => {
         <$.Box ws:id="boxId" vars={expression`${resourceVariable}`}></$.Box>
       </$.Body>
     );
-    const fragment = extractWebstudioFragment({ pages, ...data }, "boxId");
+    const fragment = extractWebstudioFragment(data, "boxId");
     expect(fragment.dataSources).toEqual([
       expect.objectContaining({ id: "1", type: "resource" }),
     ]);
@@ -386,15 +621,14 @@ describe("resources", () => {
         <$.Box ws:id="boxId" vars={expression`${resourceVariable}`}></$.Box>
       </$.Body>
     );
-    const fragment = extractWebstudioFragment({ pages, ...data }, "boxId");
+    const fragment = extractWebstudioFragment(data, "boxId");
     insertWebstudioFragmentCopy({
-      data: { pages, ...data },
+      data,
       fragment,
-      availableDataSources: findAvailableDataSources(
-        data.dataSources,
-        data.instances,
-        ["bodyId"]
-      ),
+      availableVariables: findAvailableVariables({
+        ...data,
+        startingInstanceId: "bodyId",
+      }),
     });
     const newInstanceId = Array.from(data.instances.keys()).at(-1);
     expect(newInstanceId).not.toEqual("boxId");
@@ -425,7 +659,7 @@ describe("resources", () => {
         <$.Box ws:id="boxId" resource={resourceProp}></$.Box>
       </$.Body>
     );
-    const fragment = extractWebstudioFragment({ pages, ...data }, "boxId");
+    const fragment = extractWebstudioFragment(data, "boxId");
     expect(fragment.dataSources).toEqual([
       expect.objectContaining({ id: "1", type: "variable" }),
     ]);
@@ -451,7 +685,7 @@ describe("resources", () => {
         <$.Box ws:id="boxId" resource={resourceProp}></$.Box>
       </$.Body>
     );
-    const fragment = extractWebstudioFragment({ pages, ...data }, "boxId");
+    const fragment = extractWebstudioFragment(data, "boxId");
     expect(fragment.dataSources).toEqual([]);
     expect(fragment.resources).toEqual([
       expect.objectContaining({
@@ -475,15 +709,14 @@ describe("resources", () => {
         <$.Box ws:id="boxId" resource={resourceProp}></$.Box>
       </$.Body>
     );
-    const fragment = extractWebstudioFragment({ pages, ...data }, "boxId");
+    const fragment = extractWebstudioFragment(data, "boxId");
     insertWebstudioFragmentCopy({
-      data: { pages, ...data },
+      data,
       fragment,
-      availableDataSources: findAvailableDataSources(
-        data.dataSources,
-        data.instances,
-        ["bodyId"]
-      ),
+      availableVariables: findAvailableVariables({
+        ...data,
+        startingInstanceId: "bodyId",
+      }),
     });
     const newInstanceId = Array.from(data.instances.keys()).at(-1);
     expect(newInstanceId).not.toEqual("boxId");
@@ -498,6 +731,134 @@ describe("resources", () => {
         headers: [{ name: "auth", value: "$ws$dataSource$0" }],
         body: "$ws$dataSource$0",
       }),
+    ]);
+  });
+
+  test("insert resources with new ids", () => {
+    const boxVariable = new Variable("Box Variable", "");
+    const resourceProp = new ResourceValue("Box Resource", {
+      url: expression`${boxVariable}`,
+      method: "get",
+      headers: [{ name: "auth", value: expression`${boxVariable}` }],
+      body: expression`${boxVariable}`,
+    });
+    const resourceVariable = new ResourceValue("Box Resource", {
+      url: expression`${boxVariable}`,
+      method: "get",
+      headers: [{ name: "auth", value: expression`${boxVariable}` }],
+      body: expression`${boxVariable}`,
+    });
+    const data = renderData(<$.Body ws:id="bodyId"></$.Body>);
+    const fragment = renderTemplate(
+      <$.Box
+        ws:id="boxId"
+        action={resourceProp}
+        vars={expression`${resourceVariable}`}
+      ></$.Box>
+    );
+    insertWebstudioFragmentCopy({
+      data,
+      fragment,
+      availableVariables: [],
+    });
+    const [newPropResourceId, newVariableResourceId] = data.resources.keys();
+    const [newBoxVariableId] = data.dataSources.keys();
+    const newVariableIdentifier = encodeDataVariableId(newBoxVariableId);
+    expect(Array.from(data.dataSources.values())).toEqual([
+      expect.objectContaining({
+        name: "Box Variable",
+      }),
+      expect.objectContaining({
+        name: "Box Resource",
+        resourceId: newVariableResourceId,
+      }),
+    ]);
+    expect(Array.from(data.resources.values())).toEqual([
+      expect.objectContaining({
+        id: expect.toSatisfy((value) => value !== fragment.resources[0].id),
+        url: newVariableIdentifier,
+        headers: [{ name: "auth", value: newVariableIdentifier }],
+        body: newVariableIdentifier,
+      }),
+      expect.objectContaining({
+        id: expect.toSatisfy((value) => value !== fragment.resources[1].id),
+        url: newVariableIdentifier,
+        headers: [{ name: "auth", value: newVariableIdentifier }],
+        body: newVariableIdentifier,
+      }),
+    ]);
+    expect(Array.from(data.props.values())).toEqual([
+      expect.objectContaining({
+        name: "action",
+        value: newPropResourceId,
+      }),
+      expect.objectContaining({ name: "vars" }),
+    ]);
+  });
+
+  test("preserve ids when insert resource from slot", () => {
+    const boxVariable = new Variable("Box Variable", "");
+    const resourceProp = new ResourceValue("Box Resource", {
+      url: expression`${boxVariable}`,
+      method: "get",
+      headers: [{ name: "auth", value: expression`${boxVariable}` }],
+      body: expression`${boxVariable}`,
+    });
+    const resourceVariable = new ResourceValue("Box Resource", {
+      url: expression`${boxVariable}`,
+      method: "get",
+      headers: [{ name: "auth", value: expression`${boxVariable}` }],
+      body: expression`${boxVariable}`,
+    });
+    const data = renderData(<$.Body ws:id="bodyId"></$.Body>);
+    const fragment = renderTemplate(
+      <$.Slot ws:id="slotId">
+        <$.Fragment ws:id="fragmentId">
+          <$.Box
+            ws:id="boxId"
+            action={resourceProp}
+            vars={expression`${resourceVariable}`}
+          ></$.Box>
+        </$.Fragment>
+      </$.Slot>
+    );
+    insertWebstudioFragmentCopy({
+      data,
+      fragment,
+      availableVariables: [],
+    });
+    expect(Array.from(data.dataSources.values())).toEqual([
+      expect.objectContaining({
+        name: "Box Variable",
+      }),
+      expect.objectContaining({
+        name: "Box Resource",
+        resourceId: fragment.resources[1].id,
+      }),
+    ]);
+    const oldVariableIdentifier = encodeDataVariableId(
+      fragment.dataSources[0].id
+    );
+    expect(Array.from(data.resources.values())).toEqual([
+      expect.objectContaining({
+        id: fragment.resources[0].id,
+        url: oldVariableIdentifier,
+        headers: [{ name: "auth", value: oldVariableIdentifier }],
+        body: oldVariableIdentifier,
+      }),
+      expect.objectContaining({
+        id: fragment.resources[1].id,
+        url: oldVariableIdentifier,
+        headers: [{ name: "auth", value: oldVariableIdentifier }],
+        body: oldVariableIdentifier,
+      }),
+    ]);
+    expect(Array.from(data.props.values())).toEqual([
+      expect.objectContaining({
+        name: "action",
+        value: fragment.resources[0].id,
+      }),
+      expect.objectContaining({ name: "vars" }),
     ]);
   });
 });

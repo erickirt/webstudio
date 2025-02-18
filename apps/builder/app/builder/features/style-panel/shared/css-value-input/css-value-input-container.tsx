@@ -10,16 +10,21 @@ type CssValueInputContainerProps = {
   ComponentProps<typeof CssValueInput>,
   | "onChange"
   | "onHighlight"
-  | "onChangeComplete"
   | "onReset"
   | "onAbort"
   | "intermediateValue"
->;
+  | "onChangeComplete"
+> & {
+    onChangeComplete?: ComponentProps<typeof CssValueInput>["onChangeComplete"];
+    onReset?: ComponentProps<typeof CssValueInput>["onReset"];
+  };
 
 export const CssValueInputContainer = ({
   property,
   setValue,
   deleteProperty,
+  onChangeComplete,
+  onReset,
   ...props
 }: CssValueInputContainerProps) => {
   const [intermediateValue, setIntermediateValue] = useState<
@@ -50,15 +55,18 @@ export const CssValueInputContainer = ({
           deleteProperty(property, { isEphemeral: true });
         }
       }}
-      onChangeComplete={({ value }) => {
-        setValue(value);
+      onChangeComplete={(event) => {
+        setValue(event.value);
         setIntermediateValue(undefined);
+        onChangeComplete?.(event);
       }}
       onAbort={() => {
         deleteProperty(property, { isEphemeral: true });
       }}
       onReset={() => {
+        setIntermediateValue(undefined);
         deleteProperty(property);
+        onReset?.();
       }}
     />
   );

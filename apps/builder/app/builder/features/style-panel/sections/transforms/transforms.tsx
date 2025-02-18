@@ -1,9 +1,4 @@
-import {
-  forwardRef,
-  useState,
-  type ElementRef,
-  type ComponentProps,
-} from "react";
+import { forwardRef, type ElementRef, type ComponentProps } from "react";
 import type { StyleProperty } from "@webstudio-is/css-engine";
 import { propertyDescriptions } from "@webstudio-is/css-data";
 import {
@@ -12,7 +7,6 @@ import {
   DropdownMenu,
   DropdownMenuContent,
   DropdownMenuItem,
-  DropdownMenuPortal,
   DropdownMenuTrigger,
   Flex,
   Grid,
@@ -33,7 +27,10 @@ import {
   EyeOpenIcon,
   EllipsesIcon,
 } from "@webstudio-is/icons";
-import { CollapsibleSectionRoot } from "~/builder/shared/collapsible-section";
+import {
+  CollapsibleSectionRoot,
+  useOpenState,
+} from "~/builder/shared/collapsible-section";
 import {
   addDefaultsForTransormSection,
   isTransformPanelPropertyUsed,
@@ -139,7 +136,7 @@ const TransformAdvancedPopover = () => {
 };
 
 export const Section = () => {
-  const [isOpen, setIsOpen] = useState(true);
+  const [isOpen, setIsOpen] = useOpenState(label);
 
   const styles = useComputedStyles(properties);
   const isAnyTransformPropertyAdded = transformPanels.some((panel) =>
@@ -170,31 +167,29 @@ export const Section = () => {
                     prefix={<PlusIcon />}
                   ></SectionTitleButton>
                 </DropdownMenuTrigger>
-                <DropdownMenuPortal>
-                  <DropdownMenuContent
-                    collisionPadding={16}
-                    css={{ width: theme.spacing[24] }}
-                  >
-                    {transformPanels.map((panel) => (
-                      <DropdownMenuItem
-                        disabled={isTransformPanelPropertyUsed({
+                <DropdownMenuContent
+                  collisionPadding={16}
+                  css={{ width: theme.spacing[24] }}
+                >
+                  {transformPanels.map((panel) => (
+                    <DropdownMenuItem
+                      disabled={isTransformPanelPropertyUsed({
+                        panel,
+                        styles,
+                      })}
+                      key={panel}
+                      onSelect={() => {
+                        addDefaultsForTransormSection({
                           panel,
                           styles,
-                        })}
-                        key={panel}
-                        onSelect={() => {
-                          addDefaultsForTransormSection({
-                            panel,
-                            styles,
-                          });
-                          setIsOpen(true);
-                        }}
-                      >
-                        {humanizeString(panel)}
-                      </DropdownMenuItem>
-                    ))}
-                  </DropdownMenuContent>
-                </DropdownMenuPortal>
+                        });
+                        setIsOpen(true);
+                      }}
+                    >
+                      {humanizeString(panel)}
+                    </DropdownMenuItem>
+                  ))}
+                </DropdownMenuContent>
               </DropdownMenu>
             </Flex>
           }

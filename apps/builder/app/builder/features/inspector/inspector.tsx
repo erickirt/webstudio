@@ -2,7 +2,6 @@ import { useRef } from "react";
 import { computed } from "nanostores";
 import { useStore } from "@nanostores/react";
 import type { Instance } from "@webstudio-is/sdk";
-import { rootComponent } from "@webstudio-is/sdk";
 import {
   theme,
   PanelTabs,
@@ -19,8 +18,8 @@ import {
   Kbd,
   FloatingPanelProvider,
 } from "@webstudio-is/design-system";
-import { StylePanel } from "~/builder/features/style-panel";
-import { SettingsPanelContainer } from "~/builder/features/settings-panel";
+import { ModeMenu, StylePanel } from "~/builder/features/style-panel";
+import { SettingsPanel } from "~/builder/features/settings-panel";
 import {
   $registeredComponentMetas,
   $dragAndDropState,
@@ -42,16 +41,7 @@ const InstanceInfo = ({ instance }: { instance: Instance }) => {
   }
   const label = getInstanceLabel(instance, componentMeta);
   return (
-    <Flex
-      shrink="false"
-      gap="1"
-      align="center"
-      css={{
-        p: theme.panel.padding,
-        pb: 0,
-        color: theme.colors.foregroundSubtle,
-      }}
-    >
+    <Flex shrink={false} gap="1" align="center">
       <MetaIcon icon={componentMeta.icon} />
       <Text truncate variant="labelsSentenceCase">
         {label}
@@ -102,6 +92,7 @@ export const Inspector = ({ navigatorLayout }: InspectorProps) => {
   type PanelName = "style" | "settings";
 
   const availablePanels = new Set<PanelName>();
+  availablePanels.add("settings");
   if (
     // forbid styling body in xml document
     documentType === "html" &&
@@ -110,11 +101,6 @@ export const Inspector = ({ navigatorLayout }: InspectorProps) => {
     isDesignMode
   ) {
     availablePanels.add("style");
-  }
-  // @todo hide root component settings until
-  // global data sources are implemented
-  if (selectedInstance.component !== rootComponent) {
-    availablePanels.add("settings");
   }
 
   return (
@@ -175,7 +161,18 @@ export const Inspector = ({ navigatorLayout }: InspectorProps) => {
               </PanelTabsList>
               <Separator />
               <PanelTabsContent value="style" css={contentStyle} tabIndex={-1}>
-                <InstanceInfo instance={selectedInstance} />
+                <Flex
+                  justify="between"
+                  align="center"
+                  shrink={false}
+                  css={{
+                    paddingInline: theme.panel.paddingInline,
+                    height: theme.spacing[13],
+                  }}
+                >
+                  <InstanceInfo instance={selectedInstance} />
+                  <ModeMenu />
+                </Flex>
                 <StylePanel />
               </PanelTabsContent>
               <PanelTabsContent
@@ -184,8 +181,18 @@ export const Inspector = ({ navigatorLayout }: InspectorProps) => {
                 tabIndex={-1}
               >
                 <ScrollArea>
-                  <InstanceInfo instance={selectedInstance} />
-                  <SettingsPanelContainer
+                  <Flex
+                    justify="between"
+                    align="center"
+                    shrink={false}
+                    css={{
+                      paddingInline: theme.panel.paddingInline,
+                      height: theme.spacing[13],
+                    }}
+                  >
+                    <InstanceInfo instance={selectedInstance} />
+                  </Flex>
+                  <SettingsPanel
                     // Re-render when instance changes
                     key={selectedInstance.id}
                     selectedInstance={selectedInstance}

@@ -1,23 +1,25 @@
 import { expect, test, vi } from "vitest";
 import {
-  computeExpression,
-  decodeDataVariableName,
-  encodeDataVariableName,
-  findUnsetVariableNames,
-  restoreExpressionVariables,
-  restoreTreeVariablesMutable,
-  unsetExpressionVariables,
-} from "./data-variables";
-import {
   $,
   ActionValue,
   expression,
   renderData,
   ResourceValue,
   Variable,
+  ws,
 } from "@webstudio-is/template";
-import type { InstancePath } from "./awareness";
-import type { Instances } from "@webstudio-is/sdk";
+import { encodeDataVariableId, ROOT_INSTANCE_ID } from "@webstudio-is/sdk";
+import {
+  computeExpression,
+  decodeDataVariableName,
+  encodeDataVariableName,
+  findUnsetVariableNames,
+  restoreExpressionVariables,
+  rebindTreeVariablesMutable,
+  unsetExpressionVariables,
+  deleteVariableMutable,
+  findAvailableVariables,
+} from "./data-variables";
 
 test("encode data variable name when necessary", () => {
   expect(encodeDataVariableName("formState")).toEqual("formState");
@@ -41,6 +43,80 @@ test("dencode data variable name with dollar sign", () => {
     decodeDataVariableName(encodeDataVariableName("$my$Variable"))
   ).toEqual("$my$Variable");
   expect(decodeDataVariableName("$my$Variable")).toEqual("$my$Variable");
+});
+
+test("find available variables", () => {
+  const bodyVariable = new Variable("bodyVariable", "");
+  const boxVariable = new Variable("boxVariable", "");
+  const data = renderData(
+    <$.Body ws:id="bodyId" vars={expression`${bodyVariable}`}>
+      <$.Box ws:id="boxId" vars={expression`${boxVariable}`}></$.Box>
+    </$.Body>
+  );
+  expect(
+    findAvailableVariables({ ...data, startingInstanceId: "boxId" })
+  ).toEqual([
+    expect.objectContaining({ name: "bodyVariable" }),
+    expect.objectContaining({ name: "boxVariable" }),
+  ]);
+});
+
+test("find masked variables", () => {
+  const bodyVariable = new Variable("myVariable", "");
+  const boxVariable = new Variable("myVariable", "");
+  const data = renderData(
+    <$.Body ws:id="bodyId" vars={expression`${bodyVariable}`}>
+      <$.Box ws:id="boxId" vars={expression`${boxVariable}`}></$.Box>
+    </$.Body>
+  );
+  expect(
+    findAvailableVariables({ ...data, startingInstanceId: "boxId" })
+  ).toEqual([
+    expect.objectContaining({ scopeInstanceId: "boxId", name: "myVariable" }),
+  ]);
+});
+
+test("find global variables", () => {
+  const globalVariable = new Variable("globalVariable", "");
+  const boxVariable = new Variable("boxVariable", "");
+  const data = renderData(
+    <ws.root ws:id={ROOT_INSTANCE_ID} vars={expression`${globalVariable}`}>
+      <$.Body ws:id="bodyId">
+        <$.Box ws:id="boxId" vars={expression`${boxVariable}`}></$.Box>
+      </$.Body>
+    </ws.root>
+  );
+  data.instances.delete(ROOT_INSTANCE_ID);
+  expect(
+    findAvailableVariables({ ...data, startingInstanceId: "boxId" })
+  ).toEqual([
+    expect.objectContaining({ name: "globalVariable" }),
+    expect.objectContaining({ name: "boxVariable" }),
+  ]);
+});
+
+test("find global variables in slots", () => {
+  const globalVariable = new Variable("globalVariable", "");
+  const bodyVariable = new Variable("bodyVariable", "");
+  const boxVariable = new Variable("boxVariable", "");
+  const data = renderData(
+    <ws.root ws:id={ROOT_INSTANCE_ID} vars={expression`${globalVariable}`}>
+      <$.Body ws:id="bodyId" vars={expression`${bodyVariable}`}>
+        <$.Slot ws:id="slotId">
+          <$.Fragment ws:id="fragmentId">
+            <$.Box ws:id="boxId" vars={expression`${boxVariable}`}></$.Box>
+          </$.Fragment>
+        </$.Slot>
+      </$.Body>
+    </ws.root>
+  );
+  data.instances.delete(ROOT_INSTANCE_ID);
+  expect(
+    findAvailableVariables({ ...data, startingInstanceId: "boxId" })
+  ).toEqual([
+    expect.objectContaining({ name: "globalVariable" }),
+    expect.objectContaining({ name: "boxVariable" }),
+  ]);
 });
 
 test("unset expression variables", () => {
@@ -126,24 +202,6 @@ test("compute unset variables as undefined", () => {
   expect(computeExpression("`${a}`", new Map())).toEqual("undefined");
 });
 
-const getInstancePath = (
-  instances: Instances,
-  instanceSelector: string[]
-): InstancePath => {
-  const instancePath: InstancePath = [];
-  for (let index = 0; index < instanceSelector.length; index += 1) {
-    const instanceId = instanceSelector[index];
-    const instance = instances.get(instanceId);
-    if (instance) {
-      instancePath.push({
-        instance,
-        instanceSelector: instanceSelector.slice(index),
-      });
-    }
-  }
-  return instancePath;
-};
-
 test("find unset variable names", () => {
   const resourceVariable = new ResourceValue("resourceVariable", {
     url: expression`six`,
@@ -170,10 +228,7 @@ test("find unset variable names", () => {
     </$.Body>
   );
   expect(
-    findUnsetVariableNames({
-      instancePath: getInstancePath(data.instances, ["body"]),
-      ...data,
-    })
+    findUnsetVariableNames({ startingInstanceId: "body", ...data })
   ).toEqual([
     "one",
     "two",
@@ -189,24 +244,24 @@ test("find unset variable names", () => {
 });
 
 test("restore tree variables in children", () => {
-  const oneBody = new Variable("one", "one value of body");
-  const oneBox = new Variable("one", "one value of box");
+  const bodyVariable = new Variable("one", "one value of body");
+  const boxVariable = new Variable("one", "one value of box");
   const data = renderData(
-    <$.Body ws:id="body" data-variables={expression`${oneBody}`}>
-      <$.Box ws:id="box" data-variables={expression`${oneBox}`}>
-        <$.Text ws:id="text">{expression`one`}</$.Text>
+    <$.Body ws:id="bodyId" data-vars={expression`${bodyVariable}`}>
+      <$.Box ws:id="boxId" data-vars={expression`${boxVariable}`}>
+        <$.Text ws:id="textId">{expression`one`}</$.Text>
       </$.Box>
     </$.Body>
   );
-  restoreTreeVariablesMutable({
-    instancePath: getInstancePath(data.instances, ["box", "body"]),
-    ...data,
-  });
-  expect(data.dataSources.get("1")).toEqual(
-    expect.objectContaining({ name: "one", scopeInstanceId: "box" })
-  );
-  expect(data.instances.get("text")?.children).toEqual([
-    { type: "expression", value: "$ws$dataSource$1" },
+  rebindTreeVariablesMutable({ startingInstanceId: "boxId", ...data });
+  expect(Array.from(data.dataSources.values())).toEqual([
+    expect.objectContaining({ scopeInstanceId: "bodyId" }),
+    expect.objectContaining({ scopeInstanceId: "boxId" }),
+  ]);
+  const [_bodyVariableId, boxVariableId] = data.dataSources.keys();
+  const boxIdentifier = encodeDataVariableId(boxVariableId);
+  expect(data.instances.get("textId")?.children).toEqual([
+    { type: "expression", value: boxIdentifier },
   ]);
 });
 
@@ -215,10 +270,10 @@ test("restore tree variables in props", () => {
   const oneBox = new Variable("one", "one value of box");
   const twoBox = new Variable("two", "two value of box");
   const data = renderData(
-    <$.Body ws:id="body" data-variables={expression`${oneBody}`}>
+    <$.Body ws:id="bodyId" data-body-vars={expression`${oneBody}`}>
       <$.Box
-        ws:id="box"
-        data-variables={expression`${oneBox} ${twoBox}`}
+        ws:id="boxId"
+        data-box-vars={expression`${oneBox} ${twoBox}`}
         data-one={expression`one`}
         data-action={new ActionValue(["one"], expression`one + two + three`)}
       >
@@ -226,28 +281,77 @@ test("restore tree variables in props", () => {
       </$.Box>
     </$.Body>
   );
-  restoreTreeVariablesMutable({
-    instancePath: getInstancePath(data.instances, ["box", "body"]),
-    ...data,
-  });
-  expect(data.dataSources.get("1")).toEqual(
-    expect.objectContaining({ name: "one", scopeInstanceId: "box" })
+  rebindTreeVariablesMutable({ startingInstanceId: "boxId", ...data });
+  const [_bodyVariableId, boxOneVariableId, boxTwoVariableId] =
+    data.dataSources.keys();
+  const boxOneIdentifier = encodeDataVariableId(boxOneVariableId);
+  const boxTwoIdentifier = encodeDataVariableId(boxTwoVariableId);
+  expect(Array.from(data.dataSources.values())).toEqual([
+    expect.objectContaining({ name: "one", scopeInstanceId: "bodyId" }),
+    expect.objectContaining({ name: "one", scopeInstanceId: "boxId" }),
+    expect.objectContaining({ name: "two", scopeInstanceId: "boxId" }),
+  ]);
+  expect(Array.from(data.props.values())).toEqual([
+    expect.objectContaining({ name: "data-body-vars" }),
+    expect.objectContaining({ name: "data-box-vars" }),
+    expect.objectContaining({ name: "data-one", value: boxOneIdentifier }),
+    expect.objectContaining({
+      name: "data-action",
+      value: [
+        {
+          type: "execute",
+          args: ["one"],
+          code: `one + ${boxTwoIdentifier} + three`,
+        },
+      ],
+    }),
+    expect.objectContaining({
+      name: "data-two",
+      value: `${boxOneIdentifier} + ${boxTwoIdentifier} + three`,
+    }),
+  ]);
+});
+
+test("rebind tree variables in props and children", () => {
+  const bodyVariable = new Variable("one", "one value of body");
+  const boxVariable = new Variable("one", "one value of box");
+  const data = renderData(
+    <$.Body ws:id="bodyId" data-body-vars={expression`${bodyVariable}`}>
+      <$.Box ws:id="boxId" data-box-vars={expression`${boxVariable}`}>
+        <$.Text
+          ws:id="textId"
+          data-text-vars={expression`${bodyVariable}`}
+          data-action={new ActionValue([], expression`${bodyVariable}`)}
+        >
+          {expression`${bodyVariable}`}
+        </$.Text>
+      </$.Box>
+    </$.Body>
   );
-  expect(data.dataSources.get("2")).toEqual(
-    expect.objectContaining({ name: "two", scopeInstanceId: "box" })
-  );
-  expect(data.props.get("box:data-one")?.value).toEqual("$ws$dataSource$1");
-  expect(data.props.get("text:data-two")?.value).toEqual(
-    "$ws$dataSource$1 + $ws$dataSource$2 + three"
-  );
-  expect(data.props.get("box:data-action")?.value).toEqual([
-    { type: "execute", args: ["one"], code: "one + $ws$dataSource$2 + three" },
+  rebindTreeVariablesMutable({ startingInstanceId: "boxId", ...data });
+  expect(Array.from(data.dataSources.values())).toEqual([
+    expect.objectContaining({ scopeInstanceId: "bodyId" }),
+    expect.objectContaining({ scopeInstanceId: "boxId" }),
+  ]);
+  const [_bodyVariableId, boxVariableId] = data.dataSources.keys();
+  const boxIdentifier = encodeDataVariableId(boxVariableId);
+  expect(Array.from(data.props.values())).toEqual([
+    expect.objectContaining({ name: "data-body-vars" }),
+    expect.objectContaining({ name: "data-box-vars", value: boxIdentifier }),
+    expect.objectContaining({ name: "data-text-vars", value: boxIdentifier }),
+    expect.objectContaining({
+      name: "data-action",
+      value: [{ type: "execute", args: [], code: boxIdentifier }],
+    }),
+  ]);
+  expect(data.instances.get("textId")?.children).toEqual([
+    { type: "expression", value: boxIdentifier },
   ]);
 });
 
 test("restore tree variables in resources", () => {
-  const oneBody = new Variable("one", "one value of body");
-  const oneBox = new Variable("one", "one value of box");
+  const bodyVariable = new Variable("one", "one value of body");
+  const boxVariable = new Variable("one", "one value of box");
   const resourceVariable = new ResourceValue("resourceVariable", {
     url: expression`one + 1`,
     method: "post",
@@ -261,48 +365,224 @@ test("restore tree variables in resources", () => {
     body: expression`one + 2`,
   });
   const data = renderData(
-    <$.Body ws:id="body" data-variables={expression`${oneBody}`}>
-      <$.Box ws:id="box" data-variables={expression`${oneBox}`}>
+    <$.Body ws:id="bodyId" data-vars={expression`${bodyVariable}`}>
+      <$.Box ws:id="boxId" data-vars={expression`${boxVariable}`}>
         <$.Text
           ws:id="text"
-          data-variables={expression`${resourceVariable}`}
+          data-vars={expression`${resourceVariable}`}
           data-resource={resourceProp}
         ></$.Text>
       </$.Box>
     </$.Body>
   );
-  restoreTreeVariablesMutable({
-    instancePath: getInstancePath(data.instances, ["box", "body"]),
-    ...data,
-  });
-  expect(data.dataSources.get("1")).toEqual(
-    expect.objectContaining({ name: "one", scopeInstanceId: "box" })
-  );
-  expect(data.props.get("text:data-variables")?.value).toEqual(
-    `$ws$dataSource$2`
-  );
-  expect(data.dataSources.get("2")).toEqual(
+  rebindTreeVariablesMutable({ startingInstanceId: "boxId", ...data });
+  expect(Array.from(data.dataSources.values())).toEqual([
+    expect.objectContaining({ scopeInstanceId: "bodyId" }),
+    expect.objectContaining({ scopeInstanceId: "boxId" }),
+    expect.objectContaining({ type: "resource" }),
+  ]);
+  const [_bodyVariableId, boxVariableId] = data.dataSources.keys();
+  const boxIdentifier = encodeDataVariableId(boxVariableId);
+  expect(Array.from(data.resources.values())).toEqual([
     expect.objectContaining({
-      name: "resourceVariable",
-      scopeInstanceId: "text",
-      resourceId: "resource:2",
-    })
+      url: `${boxIdentifier} + 1`,
+      method: "post",
+      headers: [{ name: "auth", value: `${boxIdentifier} + 1` }],
+      body: `${boxIdentifier} + 1`,
+    }),
+    expect.objectContaining({
+      url: `${boxIdentifier} + 2`,
+      method: "post",
+      headers: [{ name: "auth", value: `${boxIdentifier} + 2` }],
+      body: `${boxIdentifier} + 2`,
+    }),
+  ]);
+});
+
+test("rebind tree variables in resources", () => {
+  const bodyVariable = new Variable("one", "one value of body");
+  const boxVariable = new Variable("one", "one value of box");
+  const resourceVariable = new ResourceValue("resourceVariable", {
+    url: expression`${bodyVariable}`,
+    method: "post",
+    headers: [{ name: "auth", value: expression`${bodyVariable}` }],
+    body: expression`${bodyVariable}`,
+  });
+  const resourceProp = new ResourceValue("resourceProp", {
+    url: expression`${bodyVariable}`,
+    method: "post",
+    headers: [{ name: "auth", value: expression`${bodyVariable}` }],
+    body: expression`${bodyVariable}`,
+  });
+  const data = renderData(
+    <$.Body ws:id="bodyId" data-body-vars={expression`${bodyVariable}`}>
+      <$.Box ws:id="boxId" data-box-vars={expression`${boxVariable}`}>
+        <$.Text
+          ws:id="textId"
+          data-text-vars={expression`${resourceVariable}`}
+          data-action={resourceProp}
+        ></$.Text>
+      </$.Box>
+    </$.Body>
   );
-  expect(data.resources.get("resource:2")).toEqual({
-    id: "resource:2",
-    name: "resourceVariable",
-    url: "$ws$dataSource$1 + 1",
+  rebindTreeVariablesMutable({ startingInstanceId: "boxId", ...data });
+  expect(Array.from(data.dataSources.values())).toEqual([
+    expect.objectContaining({ scopeInstanceId: "bodyId" }),
+    expect.objectContaining({ scopeInstanceId: "boxId" }),
+    expect.objectContaining({ type: "resource" }),
+  ]);
+  const [_bodyVariableId, boxVariableId] = data.dataSources.keys();
+  const boxIdentifier = encodeDataVariableId(boxVariableId);
+  expect(Array.from(data.resources.values())).toEqual([
+    expect.objectContaining({
+      url: boxIdentifier,
+      method: "post",
+      headers: [{ name: "auth", value: boxIdentifier }],
+      body: boxIdentifier,
+    }),
+    expect.objectContaining({
+      url: boxIdentifier,
+      method: "post",
+      headers: [{ name: "auth", value: boxIdentifier }],
+      body: boxIdentifier,
+    }),
+  ]);
+});
+
+test("prevent rebinding tree variables from slots", () => {
+  const bodyVariable = new Variable("myVariable", "one value of body");
+  const data = renderData(
+    <$.Body ws:id="bodyId" data-body-vars={expression`${bodyVariable}`}>
+      <$.Slot ws:id="slotId">
+        <$.Fragment ws:id="fragmentId">
+          <$.Box ws:id="boxId">{expression`myVariable`}</$.Box>
+        </$.Fragment>
+      </$.Slot>
+    </$.Body>
+  );
+  rebindTreeVariablesMutable({ startingInstanceId: "boxId", ...data });
+  expect(data.instances.get("boxId")?.children).toEqual([
+    { type: "expression", value: "myVariable" },
+  ]);
+});
+
+test("delete variable and unset it in expressions", () => {
+  const bodyVariable = new Variable("bodyVariable", "one value of body");
+  const data = renderData(
+    <$.Body ws:id="bodyId" data-body-vars={expression`${bodyVariable}`}>
+      <$.Box
+        ws:id="boxId"
+        data-action={new ActionValue([], expression`${bodyVariable}`)}
+      >
+        {expression`${bodyVariable}`}
+      </$.Box>
+    </$.Body>
+  );
+  expect(Array.from(data.dataSources.values())).toEqual([
+    expect.objectContaining({ scopeInstanceId: "bodyId" }),
+  ]);
+  const [bodyVariableId] = data.dataSources.keys();
+  deleteVariableMutable(data, bodyVariableId);
+  expect(Array.from(data.props.values())).toEqual([
+    expect.objectContaining({ name: "data-body-vars", value: "bodyVariable" }),
+    expect.objectContaining({
+      name: "data-action",
+      value: [{ type: "execute", args: [], code: "bodyVariable" }],
+    }),
+  ]);
+  expect(data.instances.get("boxId")?.children).toEqual([
+    { type: "expression", value: "bodyVariable" },
+  ]);
+});
+
+test("delete variable and unset it in resources", () => {
+  const bodyVariable = new Variable("bodyVariable", "one value of body");
+  const resourceVariable = new ResourceValue("resourceVariable", {
+    url: expression`${bodyVariable}`,
     method: "post",
-    headers: [{ name: "auth", value: "$ws$dataSource$1 + 1" }],
-    body: "$ws$dataSource$1 + 1",
+    headers: [{ name: "auth", value: expression`${bodyVariable}` }],
+    body: expression`${bodyVariable}`,
   });
-  expect(data.props.get("text:data-resource")?.value).toEqual(`resource:3`);
-  expect(data.resources.get("resource:3")).toEqual({
-    id: "resource:3",
-    name: "resourceProp",
-    url: "$ws$dataSource$1 + 2",
+  const resourceProp = new ResourceValue("resourceProp", {
+    url: expression`${bodyVariable}`,
     method: "post",
-    headers: [{ name: "auth", value: "$ws$dataSource$1 + 2" }],
-    body: "$ws$dataSource$1 + 2",
+    headers: [{ name: "auth", value: expression`${bodyVariable}` }],
+    body: expression`${bodyVariable}`,
   });
+  const data = renderData(
+    <$.Body ws:id="bodyId" data-body-vars={expression`${bodyVariable}`}>
+      <$.Box
+        ws:id="boxId"
+        data-box-vars={expression`${resourceVariable}`}
+        data-resource={resourceProp}
+      ></$.Box>
+    </$.Body>
+  );
+  expect(Array.from(data.dataSources.values())).toEqual([
+    expect.objectContaining({ scopeInstanceId: "bodyId" }),
+    expect.objectContaining({ scopeInstanceId: "boxId" }),
+  ]);
+  const [bodyVariableId] = data.dataSources.keys();
+  deleteVariableMutable(data, bodyVariableId);
+  expect(Array.from(data.resources.values())).toEqual([
+    expect.objectContaining({
+      url: "bodyVariable",
+      method: "post",
+      headers: [{ name: "auth", value: "bodyVariable" }],
+      body: "bodyVariable",
+    }),
+    expect.objectContaining({
+      url: "bodyVariable",
+      method: "post",
+      headers: [{ name: "auth", value: "bodyVariable" }],
+      body: "bodyVariable",
+    }),
+  ]);
+});
+
+test("rebind expressions with parent variable when delete variable on child", () => {
+  const bodyVariable = new Variable("myVariable", "one value of body");
+  const boxVariable = new Variable("myVariable", "one value of body");
+  const data = renderData(
+    <$.Body ws:id="bodyId" data-body-vars={expression`${bodyVariable}`}>
+      <$.Box ws:id="boxId" data-box-vars={expression`${boxVariable}`}>
+        <$.Text ws:id="textId">{expression`${boxVariable}`}</$.Text>
+      </$.Box>
+    </$.Body>
+  );
+  expect(Array.from(data.dataSources.values())).toEqual([
+    expect.objectContaining({ scopeInstanceId: "bodyId" }),
+    expect.objectContaining({ scopeInstanceId: "boxId" }),
+  ]);
+  const [bodyVariableId, boxVariableId] = data.dataSources.keys();
+  deleteVariableMutable(data, boxVariableId);
+  const bodyIdentifier = encodeDataVariableId(bodyVariableId);
+  expect(data.instances.get("textId")?.children).toEqual([
+    { type: "expression", value: bodyIdentifier },
+  ]);
+});
+
+test("prevent rebinding with variables outside of slot content scope", () => {
+  const bodyVariable = new Variable("myVariable", "one value of body");
+  const boxVariable = new Variable("myVariable", "one value of body");
+  const data = renderData(
+    <$.Body ws:id="bodyId" data-body-vars={expression`${bodyVariable}`}>
+      <$.Slot>
+        <$.Fragment>
+          <$.Box ws:id="boxId" data-box-vars={expression`${boxVariable}`}>
+            <$.Text ws:id="textId">{expression`${boxVariable}`}</$.Text>
+          </$.Box>
+        </$.Fragment>
+      </$.Slot>
+    </$.Body>
+  );
+  expect(Array.from(data.dataSources.values())).toEqual([
+    expect.objectContaining({ scopeInstanceId: "bodyId" }),
+    expect.objectContaining({ scopeInstanceId: "boxId" }),
+  ]);
+  const [_bodyVariableId, boxVariableId] = data.dataSources.keys();
+  deleteVariableMutable(data, boxVariableId);
+  expect(data.instances.get("textId")?.children).toEqual([
+    { type: "expression", value: "myVariable" },
+  ]);
 });

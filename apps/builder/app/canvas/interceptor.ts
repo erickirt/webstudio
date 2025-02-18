@@ -10,9 +10,8 @@ import {
   $isPreviewMode,
   $pages,
   $selectedPageHash,
-  updateSystem,
 } from "~/shared/nano-states";
-import { savePathInHistory } from "~/shared/pages";
+import { updateCurrentSystem } from "~/shared/system";
 
 const isAbsoluteUrl = (href: string) => {
   try {
@@ -27,7 +26,7 @@ const getSelectedPagePathname = () => {
   const pages = $pages.get();
   const page = $selectedPage.get();
   const dataSourceVariables = $dataSourceVariables.get();
-  if (page && pages) {
+  if (page?.systemDataSourceId && pages) {
     const system = dataSourceVariables.get(page.systemDataSourceId) as
       | undefined
       | System;
@@ -62,10 +61,9 @@ const switchPageAndUpdateSystem = (href: string, formData?: FormData) => {
       const search = Object.fromEntries(pageHref.searchParams);
       $selectedPageHash.set({ hash: pageHref.hash });
       selectPage(page.id);
-      updateSystem(page, { params, search });
-      savePathInHistory(page.id, pageHref.pathname);
-      break;
+      updateCurrentSystem({ params, search });
     }
+    break;
   }
 };
 
